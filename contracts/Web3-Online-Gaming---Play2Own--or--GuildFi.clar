@@ -8,6 +8,10 @@
 (define-constant ERR-INSUFFICIENT-FUNDS (err u106))
 (define-constant ERR-PROPOSAL-NOT-FOUND (err u107))
 (define-constant ERR-ALREADY-VOTED (err u108))
+(define-constant ERR-LISTING-NOT-FOUND (err u109))
+(define-constant ERR-NOT-ASSET-OWNER (err u110))
+(define-constant ERR-INVALID-PRICE (err u111))
+(define-constant ERR-CANNOT-BUY-OWN-ASSET (err u112))
 
 (define-non-fungible-token game-asset uint)
 (define-fungible-token guild-token)
@@ -15,6 +19,7 @@
 (define-data-var token-id-nonce uint u0)
 (define-data-var tournament-id-nonce uint u0)
 (define-data-var proposal-id-nonce uint u0)
+(define-data-var listing-id-nonce uint u0)
 
 (define-map asset-metadata uint {
     name: (string-ascii 32),
@@ -53,6 +58,18 @@
 })
 
 (define-map dao-votes {proposal-id: uint, voter: principal} bool)
+
+(define-map marketplace-listings uint {
+    seller: principal,
+    token-id: uint,
+    price-stx: uint,
+    price-guild: uint,
+    currency-type: (string-ascii 8),
+    is-active: bool,
+    listed-block: uint
+})
+
+(define-map asset-listings {token-id: uint} uint)
 
 (define-public (mint-asset (recipient principal) (name (string-ascii 32)) (rarity (string-ascii 16)) (power uint) (game-type (string-ascii 16)))
     (let ((token-id (+ (var-get token-id-nonce) u1)))
@@ -197,6 +214,85 @@
     )
 )
 
+(define-private (calculate-suggested-price (token-id uint))
+    (let ((metadata (unwrap! (map-get? asset-metadata token-id) u0)))
+        (let ((base-price u100)
+              (power-multiplier (get power metadata))
+              (rarity-bonus (if (is-eq (get rarity metadata) "legendary") u500
+                            (if (is-eq (get rarity metadata) "epic") u300
+                            (if (is-eq (get rarity metadata) "rare") u150
+                            u50)))))
+            (+ base-price (* power-multiplier u10) rarity-bonus)
+        )
+    )
+)
+
+(define-public (list-asset-for-sale (token-id uint) (price uint) (currency (string-ascii 8)))
+    (let ((listing-id (+ (var-get listing-id-nonce) u1))
+          (asset-owner (unwrap! (nft-get-owner? game-asset token-id) ERR-INVALID-TOKEN)))
+        (asserts! (is-eq tx-sender asset-owner) ERR-NOT-ASSET-OWNER)
+        (asserts! (> price u0) ERR-INVALID-PRICE)
+        (asserts! (is-none (map-get? asset-listings {token-id: token-id})) ERR-ALREADY-JOINED)
+        (asserts! (or (is-eq currency "STX") (is-eq currency "GUILD")) ERR-INVALID-PRICE)
+        
+        (let ((price-stx (if (is-eq currency "STX") price u0))
+              (price-guild (if (is-eq currency "GUILD") price u0)))
+            (map-set marketplace-listings listing-id {
+                seller: tx-sender,
+                token-id: token-id,
+                price-stx: price-stx,
+                price-guild: price-guild,
+                currency-type: currency,
+                is-active: true,
+                listed-block: stacks-block-height
+            })
+            (map-set asset-listings {token-id: token-id} listing-id)
+            (var-set listing-id-nonce listing-id)
+            (ok listing-id)
+        )
+    )
+)
+
+(define-public (cancel-listing (listing-id uint))
+    (let ((listing (unwrap! (map-get? marketplace-listings listing-id) ERR-LISTING-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (get seller listing)) ERR-NOT-AUTHORIZED)
+        (asserts! (get is-active listing) ERR-TOURNAMENT-ENDED)
+        
+        (map-set marketplace-listings listing-id (merge listing {is-active: false}))
+        (map-delete asset-listings {token-id: (get token-id listing)})
+        (ok true)
+    )
+)
+
+(define-public (buy-asset (listing-id uint))
+    (let ((listing (unwrap! (map-get? marketplace-listings listing-id) ERR-LISTING-NOT-FOUND)))
+        (asserts! (get is-active listing) ERR-TOURNAMENT-ENDED)
+        (asserts! (not (is-eq tx-sender (get seller listing))) ERR-CANNOT-BUY-OWN-ASSET)
+        
+        (let ((token-id (get token-id listing))
+              (seller (get seller listing))
+              (currency (get currency-type listing)))
+            (if (is-eq currency "STX")
+                (let ((price (get price-stx listing)))
+                    (try! (stx-transfer? price tx-sender seller))
+                    (try! (nft-transfer? game-asset token-id seller tx-sender))
+                    (map-set marketplace-listings listing-id (merge listing {is-active: false}))
+                    (map-delete asset-listings {token-id: token-id})
+                    (ok true)
+                )
+                (let ((price (get price-guild listing)))
+                    (asserts! (>= (ft-get-balance guild-token tx-sender) price) ERR-INSUFFICIENT-FUNDS)
+                    (try! (ft-transfer? guild-token price tx-sender seller))
+                    (try! (nft-transfer? game-asset token-id seller tx-sender))
+                    (map-set marketplace-listings listing-id (merge listing {is-active: false}))
+                    (map-delete asset-listings {token-id: token-id})
+                    (ok true)
+                )
+            )
+        )
+    )
+)
+
 (define-read-only (get-asset-metadata (token-id uint))
     (map-get? asset-metadata token-id)
 )
@@ -223,4 +319,16 @@
 
 (define-read-only (is-tournament-player (tournament-id uint) (player principal))
     (is-some (map-get? tournament-players {tournament-id: tournament-id, player: player}))
+)
+
+(define-read-only (get-marketplace-listing (listing-id uint))
+    (map-get? marketplace-listings listing-id)
+)
+
+(define-read-only (get-asset-listing (token-id uint))
+    (map-get? asset-listings {token-id: token-id})
+)
+
+(define-read-only (get-suggested-price (token-id uint))
+    (calculate-suggested-price token-id)
 )
