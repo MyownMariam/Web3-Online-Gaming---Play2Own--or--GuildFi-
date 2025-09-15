@@ -332,3 +332,16 @@
 (define-read-only (get-suggested-price (token-id uint))
     (calculate-suggested-price token-id)
 )
+
+(define-public (upgrade-asset (token-id uint) (upgrade-cost uint))
+    (let ((metadata (unwrap! (map-get? asset-metadata token-id) ERR-INVALID-TOKEN))
+          (asset-owner (unwrap! (nft-get-owner? game-asset token-id) ERR-NOT-ASSET-OWNER)))
+        (asserts! (is-eq tx-sender asset-owner) ERR-NOT-AUTHORIZED)
+        (asserts! (>= (ft-get-balance guild-token tx-sender) upgrade-cost) ERR-INSUFFICIENT-FUNDS)
+        (try! (ft-transfer? guild-token upgrade-cost tx-sender (as-contract tx-sender)))
+        (map-set asset-metadata token-id (merge metadata {
+            power: (+ (get power metadata) u10)
+        }))
+        (ok true)
+    )
+)
