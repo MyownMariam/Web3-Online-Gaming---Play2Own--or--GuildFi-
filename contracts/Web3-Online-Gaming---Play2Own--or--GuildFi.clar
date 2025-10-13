@@ -12,6 +12,7 @@
 (define-constant ERR-NOT-ASSET-OWNER (err u110))
 (define-constant ERR-INVALID-PRICE (err u111))
 (define-constant ERR-CANNOT-BUY-OWN-ASSET (err u112))
+(define-constant BURN-ADDRESS 'ST000000000000000000002AMW42H)
 
 (define-non-fungible-token game-asset uint)
 (define-fungible-token guild-token)
@@ -343,5 +344,38 @@
             power: (+ (get power metadata) u10)
         }))
         (ok true)
+    )
+)
+
+(define-public (merge-assets (token-id1 uint) (token-id2 uint))
+    (let ((metadata1 (unwrap! (map-get? asset-metadata token-id1) ERR-INVALID-TOKEN))
+          (metadata2 (unwrap! (map-get? asset-metadata token-id2) ERR-INVALID-TOKEN))
+          (owner1 (unwrap! (nft-get-owner? game-asset token-id1) ERR-NOT-ASSET-OWNER))
+          (owner2 (unwrap! (nft-get-owner? game-asset token-id2) ERR-NOT-ASSET-OWNER))
+          (fusion-cost u1000)
+          (new-token-id (+ (var-get token-id-nonce) u1)))
+        (asserts! (is-eq tx-sender owner1) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq tx-sender owner2) ERR-NOT-AUTHORIZED)
+        (asserts! (not (is-eq token-id1 token-id2)) ERR-INVALID-TOKEN)
+        (asserts! (>= (ft-get-balance guild-token tx-sender) fusion-cost) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (is-none (map-get? asset-listings {token-id: token-id1})) ERR-ALREADY-JOINED)
+        (asserts! (is-none (map-get? asset-listings {token-id: token-id2})) ERR-ALREADY-JOINED)
+        (try! (nft-burn? game-asset token-id1 tx-sender))
+        (try! (nft-burn? game-asset token-id2 tx-sender))
+        (try! (ft-transfer? guild-token fusion-cost tx-sender BURN-ADDRESS))
+        (try! (nft-mint? game-asset new-token-id tx-sender))
+        (let ((new-power (/ (+ (get power metadata1) (get power metadata2)) u2))
+              (new-rarity (if (> (get power metadata1) (get power metadata2)) (get rarity metadata1) (get rarity metadata2)))
+              (new-name "Fused Asset")
+              (new-game-type (get game-type metadata1)))
+            (map-set asset-metadata new-token-id {
+                name: new-name,
+                rarity: new-rarity,
+                power: new-power,
+                game-type: new-game-type
+            })
+            (var-set token-id-nonce new-token-id)
+            (ok new-token-id)
+        )
     )
 )
