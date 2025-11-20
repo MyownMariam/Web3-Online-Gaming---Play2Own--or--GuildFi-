@@ -21,6 +21,7 @@
 (define-data-var tournament-id-nonce uint u0)
 (define-data-var proposal-id-nonce uint u0)
 (define-data-var listing-id-nonce uint u0)
+(define-data-var rental-id-nonce uint u0)
 
 (define-map asset-metadata uint {
     name: (string-ascii 32),
@@ -71,6 +72,27 @@
 })
 
 (define-map asset-listings {token-id: uint} uint)
+
+(define-map rental-listings uint {
+    owner: principal,
+    token-id: uint,
+    rental-fee: uint,
+    duration: uint,
+    currency-type: (string-ascii 8),
+    is-active: bool,
+    listed-block: uint
+})
+
+(define-map asset-rentals {token-id: uint} uint)
+
+(define-map active-rentals uint {
+    renter: principal,
+    token-id: uint,
+    rental-fee: uint,
+    start-block: uint,
+    end-block: uint,
+    currency-type: (string-ascii 8)
+})
 
 (define-public (mint-asset (recipient principal) (name (string-ascii 32)) (rarity (string-ascii 16)) (power uint) (game-type (string-ascii 16)))
     (let ((token-id (+ (var-get token-id-nonce) u1)))
@@ -377,5 +399,84 @@
             (var-set token-id-nonce new-token-id)
             (ok new-token-id)
         )
+    )
+)
+
+(define-public (list-asset-for-rent (token-id uint) (rental-fee uint) (duration uint) (currency (string-ascii 8)))
+    (let ((rental-id (+ (var-get rental-id-nonce) u1))
+          (asset-owner (unwrap! (nft-get-owner? game-asset token-id) ERR-INVALID-TOKEN)))
+        (asserts! (is-eq tx-sender asset-owner) ERR-NOT-AUTHORIZED)
+        (asserts! (> rental-fee u0) ERR-INVALID-PRICE)
+        (asserts! (> duration u0) ERR-INVALID-PRICE)
+        (asserts! (is-none (map-get? asset-rentals {token-id: token-id})) ERR-ALREADY-JOINED)
+        (asserts! (or (is-eq currency "STX") (is-eq currency "GUILD")) ERR-INVALID-PRICE)
+        (map-set rental-listings rental-id {
+            owner: tx-sender,
+            token-id: token-id,
+            rental-fee: rental-fee,
+            duration: duration,
+            currency-type: currency,
+            is-active: true,
+            listed-block: stacks-block-height
+        })
+        (map-set asset-rentals {token-id: token-id} rental-id)
+        (var-set rental-id-nonce rental-id)
+        (ok rental-id)
+    )
+)
+
+(define-public (rent-asset (rental-id uint))
+    (let ((rental (unwrap! (map-get? rental-listings rental-id) ERR-LISTING-NOT-FOUND)))
+        (asserts! (get is-active rental) ERR-TOURNAMENT-ENDED)
+        (asserts! (not (is-eq tx-sender (get owner rental))) ERR-CANNOT-BUY-OWN-ASSET)
+        (let ((token-id (get token-id rental))
+              (owner (get owner rental))
+              (rental-fee (get rental-fee rental))
+              (duration (get duration rental))
+              (currency (get currency-type rental))
+              (active-rental-id (+ (var-get rental-id-nonce) u1)))
+            (if (is-eq currency "STX")
+                (let ((fee rental-fee))
+                    (try! (stx-transfer? fee tx-sender owner))
+                    (map-set active-rentals active-rental-id {
+                        renter: tx-sender,
+                        token-id: token-id,
+                        rental-fee: fee,
+                        start-block: stacks-block-height,
+                        end-block: (+ stacks-block-height duration),
+                        currency-type: currency
+                    })
+                    (map-set rental-listings rental-id (merge rental {is-active: false}))
+                    (map-delete asset-rentals {token-id: token-id})
+                    (var-set rental-id-nonce active-rental-id)
+                    (ok active-rental-id)
+                )
+                (let ((fee rental-fee))
+                    (asserts! (>= (ft-get-balance guild-token tx-sender) fee) ERR-INSUFFICIENT-FUNDS)
+                    (try! (ft-transfer? guild-token fee tx-sender owner))
+                    (map-set active-rentals active-rental-id {
+                        renter: tx-sender,
+                        token-id: token-id,
+                        rental-fee: fee,
+                        start-block: stacks-block-height,
+                        end-block: (+ stacks-block-height duration),
+                        currency-type: currency
+                    })
+                    (map-set rental-listings rental-id (merge rental {is-active: false}))
+                    (map-delete asset-rentals {token-id: token-id})
+                    (var-set rental-id-nonce active-rental-id)
+                    (ok active-rental-id)
+                )
+            )
+        )
+    )
+)
+
+(define-public (return-asset (rental-id uint))
+    (let ((rental (unwrap! (map-get? active-rentals rental-id) ERR-LISTING-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (get renter rental)) ERR-NOT-AUTHORIZED)
+        (asserts! (>= stacks-block-height (get end-block rental)) ERR-TOURNAMENT-ENDED)
+        (map-delete active-rentals rental-id)
+        (ok true)
     )
 )
